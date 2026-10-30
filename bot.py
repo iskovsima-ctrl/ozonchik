@@ -13,9 +13,9 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OZON_CLIENT_ID = os.environ["OZON_CLIENT_ID"]
-OZON_API_KEY = os.environ["OZON_API_KEY"]
+BOT_TOKEN = os.environ["8876687619:AAF5roPChRSMwPDLaZFmmL0aP0Gowb56s6g"]
+OZON_CLIENT_ID = os.environ["3964041"]
+OZON_API_KEY = os.environ["94b93451-a150-4dbb-a6ac-a0403ca2ae95"]
 
 # --- АВТОРИЗАЦИЯ ---
 ADMIN_ID =  int(os.environ.get("ADMIN_ID", "6354368621"))  # ID разработчика/админа
