@@ -1,4 +1,4 @@
-import os
+
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -7,29 +7,38 @@ from zoneinfo import ZoneInfo
 import requests
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ==========================================
+# API КЛЮЧИ — ВСТАВЬ СВОИ НОВЫЕ КЛЮЧИ
+# ==========================================
 
-BOT_TOKEN = os.environ["8876687619:AAF5roPChRSMwPDLaZFmmL0aP0Gowb56s6g"]
-OZON_CLIENT_ID = os.environ["3964041"]
-OZON_API_KEY = os.environ["94b93451-a150-4dbb-a6ac-a0403ca2ae95"]
+BOT_TOKEN = "ВСТАВЬ_НОВЫЙ_TELEGRAM_TOKEN"
 
-# --- АВТОРИЗАЦИЯ ---
-ADMIN_ID =  int(os.environ.get("ADMIN_ID", "6354368621"))  # ID разработчика/админа
-# ALLOWED_USERS — список ID через запятую, например: "123456789,987654321"
-_allowed_raw = os.environ.get("ALLOWED_USERS", "")
+OZON_CLIENT_ID = "ВСТАВЬ_OZON_CLIENT_ID"
+
+OZON_API_KEY = "ВСТАВЬ_НОВЫЙ_OZON_API_KEY"
+
+ADMIN_ID = 6354368621
+
+# Дополнительные пользователи
 ALLOWED_USERS = set()
-if _allowed_raw:
-    for uid in _allowed_raw.split(","):
-        uid = uid.strip()
-        if uid:
-            try:
-                ALLOWED_USERS.add(int(uid))
-            except ValueError:
-                pass
+
+# ==========================================
+# НАСТРОЙКИ
+# ==========================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 OZON_URL = "https://api-seller.ozon.ru/v3/posting/fbs/list"
 
@@ -52,82 +61,108 @@ keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ---------- авторизация ----------
 
-def _is_authorized(user_id: int) -> bool:
+# ==========================================
+# АВТОРИЗАЦИЯ
+# ==========================================
+
+def is_authorized(user_id):
     return user_id == ADMIN_ID or user_id in ALLOWED_USERS
 
 
-async def _check_auth(update: Update) -> bool:
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id is None:
+async def check_auth(update):
+    user = update.effective_user
+
+    if not user:
         return False
-    if _is_authorized(user_id):
+
+    if is_authorized(user.id):
         return True
-    # Уведомляем админа о попытке доступа
-    if ADMIN_ID:
-        username = update.effective_user.username or "—"
-        first_name = update.effective_user.first_name or "—"
-        try:
-            await update.get_bot().send_message(
-                chat_id=ADMIN_ID,
-                text=f"⚠️ Попытка доступа\n"
-                     f"ID: {user_id}\n"
-                     f"Имя: {first_name}\n"
-                     f"Юзернейм: @{username}\n\n"
-                     f"Чтобы дать доступ: /adduser {user_id}"
+
+    try:
+        await update.get_bot().send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                "⚠️ Попытка доступа\n"
+                f"ID: {user.id}\n"
+                f"Имя: {user.first_name}\n"
+                f"Username: @{user.username or '—'}\n\n"
+                f"Чтобы дать доступ: /adduser {user.id}"
             )
-        except Exception:
-            pass
-    await update.message.reply_text("❌ У вас нет доступа к этому боту.")
+        )
+    except Exception:
+        logger.exception("Не удалось уведомить администратора")
+
+    if update.message:
+        await update.message.reply_text(
+            "❌ У вас нет доступа к этому боту."
+        )
+
     return False
 
 
-# ---------- ядро ----------
+# ==========================================
+# ДАТЫ
+# ==========================================
 
-def _parse_api_datetime(dt_str: str):
+def parse_api_datetime(dt_str):
     if not dt_str or dt_str in ("null", "None", ""):
         return None
+
     if dt_str.endswith("Z"):
         dt_str = dt_str[:-1] + "+00:00"
+
     try:
         dt = datetime.fromisoformat(dt_str)
+
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=MOSCOW_TZ)
+
         return dt.astimezone(MOSCOW_TZ)
+
     except Exception:
         return None
 
 
-def _is_cancelled_before_ship(posting: dict) -> bool:
+def is_cancelled_before_ship(posting):
     status = posting.get("status", "")
+
     if status not in ("cancelled", "cancelled_by_client"):
         return False
+
     cancellation = posting.get("cancellation") or {}
-    if cancellation.get("cancelled_after_ship") is True:
-        return False
-    return True
+
+    return cancellation.get("cancelled_after_ship") is not True
 
 
-def _get_ship_date(posting: dict) -> tuple:
+def get_ship_date(posting):
     status = posting.get("status", "")
-    dd = _parse_api_datetime(posting.get("delivering_date"))
-    if dd:
-        return dd, "delivering_date"
-    pv = _parse_api_datetime(posting.get("pickup_code_verified_at"))
-    if pv:
-        return pv, "pickup_code_verified_at"
-    su = _parse_api_datetime(posting.get("substatus_updated_at"))
-    if su and status in SHIPPED_STATUSES:
-        return su, "substatus_updated_at"
-    if status in SHIPPED_STATUSES:
-        sd = _parse_api_datetime(posting.get("shipment_date"))
-        if sd:
-            return sd, "shipment_date_fallback"
-    return None, "none"
+
+    fields = [
+        "delivering_date",
+        "pickup_code_verified_at",
+        "substatus_updated_at",
+        "shipment_date",
+    ]
+
+    for field in fields:
+        value = parse_api_datetime(posting.get(field))
+
+        if value:
+            if field in ("substatus_updated_at", "shipment_date"):
+                if status not in SHIPPED_STATUSES:
+                    continue
+
+            return value
+
+    return None
 
 
-def _headers():
+# ==========================================
+# OZON API
+# ==========================================
+
+def get_headers():
     return {
         "Client-Id": str(OZON_CLIENT_ID),
         "Api-Key": OZON_API_KEY,
@@ -135,281 +170,522 @@ def _headers():
     }
 
 
-def _fetch_postings_in_range(since_dt: datetime, to_dt: datetime) -> list:
-    since = since_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    to = to_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+def fetch_postings(since_dt, to_dt):
+
+    since = (
+        since_dt.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+    to = (
+        to_dt.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
     all_postings = []
     offset = 0
     limit = 1000
+
     while True:
+
         payload = {
             "dir": "ASC",
-            "filter": {"since": since, "to": to},
+            "filter": {
+                "since": since,
+                "to": to,
+            },
             "limit": limit,
             "offset": offset,
-            "with": {"analytics_data": False, "financial_data": False},
+            "with": {
+                "analytics_data": False,
+                "financial_data": False,
+            },
         }
-        resp = requests.post(OZON_URL, headers=_headers(), json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+
+        response = requests.post(
+            OZON_URL,
+            headers=get_headers(),
+            json=payload,
+            timeout=30
+        )
+
+        if not response.ok:
+            logger.error(
+                "Ozon API error %s: %s",
+                response.status_code,
+                response.text[:1000]
+            )
+
+        response.raise_for_status()
+
+        data = response.json()
         result = data.get("result", {})
-        all_postings.extend(result.get("postings", []))
+
+        all_postings.extend(
+            result.get("postings", [])
+        )
+
         if not result.get("has_next", False):
             break
+
         offset += limit
+
     return all_postings
 
 
-def _filter_postings_by_ship_date(postings: list, target_date_msk: datetime) -> list:
-    target_next = target_date_msk + timedelta(days=1)
+# ==========================================
+# СТАТИСТИКА
+# ==========================================
+
+def filter_postings(postings, target_date):
+
     matched = []
+
     for posting in postings:
-        if _is_cancelled_before_ship(posting):
+
+        if is_cancelled_before_ship(posting):
             continue
-        ship_dt, _ = _get_ship_date(posting)
-        if ship_dt is None:
+
+        ship_date = get_ship_date(posting)
+
+        if not ship_date:
             continue
-        if target_date_msk.date() <= ship_dt.date() < target_next.date():
+
+        if ship_date.date() == target_date.date():
             matched.append(posting)
+
     return matched
 
 
-# ---------- публичные функции ----------
+def get_postings_for_day(date_str):
 
-def get_postings_for_day(date_str: str) -> int:
-    naive = datetime.strptime(date_str, "%d.%m.%Y")
+    naive = datetime.strptime(
+        date_str,
+        "%d.%m.%Y"
+    )
+
     target = naive.replace(tzinfo=MOSCOW_TZ)
-    postings = _fetch_postings_in_range(target - timedelta(days=30), target + timedelta(days=1))
-    return len(_filter_postings_by_ship_date(postings, target))
+
+    postings = fetch_postings(
+        target - timedelta(days=30),
+        target + timedelta(days=1)
+    )
+
+    return len(filter_postings(postings, target))
 
 
-def get_all_report(date_from_str: str, date_to_str: str) -> list:
-    start = datetime.strptime(date_from_str, "%d.%m.%Y").replace(tzinfo=MOSCOW_TZ)
-    end = datetime.strptime(date_to_str, "%d.%m.%Y").replace(tzinfo=MOSCOW_TZ)
+def get_all_report(date_from_str, date_to_str):
+
+    start = datetime.strptime(
+        date_from_str,
+        "%d.%m.%Y"
+    ).replace(tzinfo=MOSCOW_TZ)
+
+    end = datetime.strptime(
+        date_to_str,
+        "%d.%m.%Y"
+    ).replace(tzinfo=MOSCOW_TZ)
+
     if end < start:
         start, end = end, start
-    since = start - timedelta(days=30)
-    to = end + timedelta(days=1)
-    all_postings = _fetch_postings_in_range(since, to)
+
+    postings = fetch_postings(
+        start - timedelta(days=30),
+        end + timedelta(days=1)
+    )
+
     daily = {}
-    cur = start
-    while cur <= end:
-        daily[cur.date()] = 0
-        cur += timedelta(days=1)
-    for posting in all_postings:
-        if _is_cancelled_before_ship(posting):
+
+    current = start
+
+    while current.date() <= end.date():
+        daily[current.date()] = 0
+        current += timedelta(days=1)
+
+    for posting in postings:
+
+        if is_cancelled_before_ship(posting):
             continue
-        ship_dt, _ = _get_ship_date(posting)
-        if ship_dt is None:
+
+        ship_date = get_ship_date(posting)
+
+        if not ship_date:
             continue
-        d = ship_dt.date()
-        if start.date() <= d <= end.date():
-            daily[d] = daily.get(d, 0) + 1
+
+        day = ship_date.date()
+
+        if start.date() <= day <= end.date():
+            daily[day] = daily.get(day, 0) + 1
+
     results = []
-    cur = start
-    while cur <= end:
-        results.append((cur.strftime("%d.%m.%Y"), daily.get(cur.date(), 0)))
-        cur += timedelta(days=1)
+
+    current = start
+
+    while current.date() <= end.date():
+
+        results.append((
+            current.strftime("%d.%m.%Y"),
+            daily.get(current.date(), 0)
+        ))
+
+        current += timedelta(days=1)
+
     return results
 
 
-# ---------- хендлеры ----------
+# ==========================================
+# ОБРАБОТКА ОШИБОК OZON
+# ==========================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _check_auth(update):
+def get_api_error(error):
+
+    response = getattr(error, "response", None)
+
+    if response is None:
+        return "Неизвестная ошибка"
+
+    try:
+        return response.text[:1000]
+    except Exception:
+        return str(error)
+
+
+# ==========================================
+# TELEGRAM КОМАНДЫ
+# ==========================================
+
+async def start(update, context):
+
+    if not await check_auth(update):
         return
+
     await update.message.reply_text(
-        "Добрый день! Это статистика отгрузок Ozon. Команды /date и /all писать не обязательно, можно сразу дату. \n\n"
+        "Добрый день! 📦\n\n"
+        "Это бот статистики отгрузок Ozon.\n\n"
         "Команды:\n"
-        "• /date 01.01.2026 — отгрузки за день\n"
-        "• /all 01.01.2026-12.12.2026 — сводка по дням",
-        reply_markup=keyboard,
+        "/date 30.10.2026 — отгрузки за день\n"
+        "/all 01.10.2026-30.10.2026 — сводка\n"
+        "/myid — узнать свой ID",
+        reply_markup=keyboard
     )
 
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _check_auth(update):
+async def date_command(update, context):
+
+    if not await check_auth(update):
         return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Укажи дату: /date 30.10.2026"
+        )
+        return
+
+    date_str = context.args[0]
+
+    try:
+        datetime.strptime(date_str, "%d.%m.%Y")
+
+        await update.message.reply_text(
+            "⏳ Запрашиваю данные Ozon..."
+        )
+
+        count = await asyncio.to_thread(
+            get_postings_for_day,
+            date_str
+        )
+
+        await update.message.reply_text(
+            f"📦 Отгрузки за {date_str}\n\n"
+            f"Всего заказов: {count}"
+        )
+
+    except requests.HTTPError as error:
+        logger.exception("Ozon API HTTP error")
+
+        await update.message.reply_text(
+            "❌ Ошибка Ozon API\n"
+            f"{get_api_error(error)}"
+        )
+
+    except Exception:
+        logger.exception("Date command error")
+
+        await update.message.reply_text(
+            "❌ Ошибка. Посмотри логи."
+        )
+
+
+async def all_command(update, context):
+
+    if not await check_auth(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Укажи диапазон:\n"
+            "/all 01.10.2026-30.10.2026"
+        )
+        return
+
+    parts = context.args[0].split("-")
+
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "Неверный формат дат."
+        )
+        return
+
+    await handle_all(
+        update,
+        parts[0],
+        parts[1]
+    )
+
+
+async def handle_all(update, date_from, date_to):
+
+    try:
+        await update.message.reply_text(
+            f"⏳ Считаю отгрузки с {date_from} по {date_to}..."
+        )
+
+        results = await asyncio.to_thread(
+            get_all_report,
+            date_from,
+            date_to
+        )
+
+        lines = []
+        total = 0
+
+        for day, count in results:
+            lines.append(f"{day} — {count}")
+            total += count
+
+        lines.append(f"\n📊 Итого: {total}")
+
+        text = "\n".join(lines)
+
+        if len(text) > 4000:
+            text = text[:3900] + "\n... (обрезано)"
+
+        await update.message.reply_text(text)
+
+    except requests.HTTPError as error:
+        logger.exception("Ozon API HTTP error")
+
+        await update.message.reply_text(
+            "❌ Ошибка Ozon API\n"
+            f"{get_api_error(error)}"
+        )
+
+    except Exception:
+        logger.exception("Report error")
+
+        await update.message.reply_text(
+            "❌ Ошибка. Посмотри логи."
+        )
+
+
+async def message_handler(update, context):
+
+    if not await check_auth(update):
+        return
+
     text = (update.message.text or "").strip()
 
     if text == "📦 Отгрузки за дату":
-        await update.message.reply_text("Введи дату, например: 01.01.2026")
-        return
-    if text == "📈 Сводка по дням":
-        await update.message.reply_text("Введи диапазон, например: 01.01.2026-12.12.2026")
+        await update.message.reply_text(
+            "Введи дату, например: 30.10.2026"
+        )
         return
 
-    # Просто дата — отгрузки за день
+    if text == "📈 Сводка по дням":
+        await update.message.reply_text(
+            "Введи диапазон, например:\n"
+            "01.10.2026-30.10.2026"
+        )
+        return
+
     try:
         datetime.strptime(text, "%d.%m.%Y")
-        await update.message.reply_text("⏳ Запрашиваю данные Ozon...")
-        count = await asyncio.to_thread(get_postings_for_day, text)
-        await update.message.reply_text(f"📦 Отгрузки за {text}\n\nВсего заказов: {count}")
+
+        await update.message.reply_text(
+            "⏳ Запрашиваю данные Ozon..."
+        )
+
+        count = await asyncio.to_thread(
+            get_postings_for_day,
+            text
+        )
+
+        await update.message.reply_text(
+            f"📦 Отгрузки за {text}\n\n"
+            f"Всего заказов: {count}"
+        )
+
         return
+
     except ValueError:
         pass
 
-    # Диапазон через кнопку
     if "-" in text and text.count(".") >= 4:
+
         parts = text.split("-")
+
         if len(parts) == 2:
             try:
                 datetime.strptime(parts[0].strip(), "%d.%m.%Y")
                 datetime.strptime(parts[1].strip(), "%d.%m.%Y")
-                await _handle_all(update, parts[0].strip(), parts[1].strip())
+
+                await handle_all(
+                    update,
+                    parts[0].strip(),
+                    parts[1].strip()
+                )
+
                 return
+
             except ValueError:
                 pass
 
     await update.message.reply_text(
-        "Не понял. Примеры:\n"
-        "• /date 01.01.2026\n"
-        "• /all 01.01.2026-12.12.2026"
+        "Не понял дату.\n"
+        "Пример: 30.10.2026"
     )
 
 
-async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _check_auth(update):
+# ==========================================
+# УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ
+# ==========================================
+
+async def adduser_command(update, context):
+
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(
+            "❌ Только администратор может добавлять пользователей."
+        )
         return
+
     if not context.args:
-        await update.message.reply_text("Укажи дату: /date 01.01.2026")
+        await update.message.reply_text(
+            "Использование: /adduser 123456789"
+        )
         return
-    date_str = context.args[0].strip()
+
     try:
-        datetime.strptime(date_str, "%d.%m.%Y")
+        user_id = int(context.args[0])
+
+        ALLOWED_USERS.add(user_id)
+
+        await update.message.reply_text(
+            f"✅ Пользователь {user_id} добавлен."
+        )
+
     except ValueError:
-        await update.message.reply_text("Неверный формат. Пример: /date 01.01.2026")
+        await update.message.reply_text(
+            "ID должен быть числом."
+        )
+
+
+async def removeuser_command(update, context):
+
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(
+            "❌ Только администратор может удалять пользователей."
+        )
         return
 
-    await update.message.reply_text("⏳ Запрашиваю данные Ozon...")
-    try:
-        count = await asyncio.to_thread(get_postings_for_day, date_str)
-        await update.message.reply_text(f"📦 Отгрузки за {date_str}\n\nВсего заказов: {count}")
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", "unknown")
-        await update.message.reply_text(f"❌ Ошибка Ozon API ({status})")
-    except Exception:
-        await update.message.reply_text("❌ Ошибка. Посмотри логи.")
-
-
-async def _handle_all(update: Update, date_from: str, date_to: str):
-    await update.message.reply_text(f"⏳ Считаю отгрузки с {date_from} по {date_to}...")
-    try:
-        results = await asyncio.to_thread(get_all_report, date_from, date_to)
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", "unknown")
-        await update.message.reply_text(f"❌ Ошибка Ozon API ({status})")
-        return
-    except Exception:
-        await update.message.reply_text("❌ Ошибка. Посмотри логи.")
-        return
-
-    lines = []
-    total = 0
-    for d, c in results:
-        lines.append(f"{d} — {c}")
-        total += c
-    lines.append(f"\n📊 Итого: {total}")
-
-    text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:4000] + "\n\n... (обрезано)"
-    await update.message.reply_text(text)
-
-
-async def all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _check_auth(update):
-        return
     if not context.args:
-        await update.message.reply_text("Укажи диапазон: /all 01.01.2026-12.12.2026")
+        await update.message.reply_text(
+            "Использование: /removeuser 123456789"
+        )
         return
-    raw = context.args[0].strip()
-    parts = raw.split("-")
-    if len(parts) != 2:
-        await update.message.reply_text("Неверный формат. Пример: /all 01.01.2026-12.12.2026")
-        return
+
     try:
-        datetime.strptime(parts[0].strip(), "%d.%m.%Y")
-        datetime.strptime(parts[1].strip(), "%d.%m.%Y")
+        user_id = int(context.args[0])
+
+        ALLOWED_USERS.discard(user_id)
+
+        await update.message.reply_text(
+            f"✅ Пользователь {user_id} удалён."
+        )
+
     except ValueError:
-        await update.message.reply_text("Неверный формат дат.")
-        return
-    await _handle_all(update, parts[0].strip(), parts[1].strip())
+        await update.message.reply_text(
+            "ID должен быть числом."
+        )
 
 
-# ---------- управление доступом (только админ) ----------
+async def listusers_command(update, context):
 
-async def adduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Только администратор может добавлять пользователей.")
-        return
-    if not context.args:
-        await update.message.reply_text("Укажи ID пользователя: /adduser 123456789")
-        return
-    try:
-        new_id = int(context.args[0].strip())
-    except ValueError:
-        await update.message.reply_text("ID должен быть числом.")
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text(
+            "❌ Только администратор может смотреть список."
+        )
         return
 
-    ALLOWED_USERS.add(new_id)
-    await update.message.reply_text(f"✅ Пользователь {new_id} добавлен в белый список.\n\n"
-                                    f"Текущий список: {sorted(ALLOWED_USERS)}")
-
-
-async def removeuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Только администратор может удалять пользователей.")
-        return
-    if not context.args:
-        await update.message.reply_text("Укажи ID пользователя: /removeuser 123456789")
-        return
-    try:
-        rem_id = int(context.args[0].strip())
-    except ValueError:
-        await update.message.reply_text("ID должен быть числом.")
+    if not ALLOWED_USERS:
+        await update.message.reply_text(
+            "Список пользователей пуст."
+        )
         return
 
-    if rem_id in ALLOWED_USERS:
-        ALLOWED_USERS.discard(rem_id)
-        await update.message.reply_text(f"✅ Пользователь {rem_id} удалён.\n\n"
-                                        f"Текущий список: {sorted(ALLOWED_USERS)}")
-    else:
-        await update.message.reply_text(f"Пользователь {rem_id} не найден в списке.")
+    await update.message.reply_text(
+        "👥 Разрешённые пользователи:\n" +
+        "\n".join(
+            f"• {uid}" for uid in sorted(ALLOWED_USERS)
+        )
+    )
 
 
-async def listusers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.effective_user else None
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Только администратор может смотреть список.")
-        return
-    users = sorted(ALLOWED_USERS)
-    if not users:
-        await update.message.reply_text("Список пуст. Только админ имеет доступ.")
-        return
-    await update.message.reply_text(f"👥 Разрешённые пользователи:\n" + "\n".join(f"• {uid}" for uid in users))
+async def myid_command(update, context):
+
+    user_id = update.effective_user.id
+
+    await update.message.reply_text(
+        f"🆔 Твой Telegram ID: {user_id}"
+    )
 
 
-async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Любой пользователь может узнать свой ID."""
-    user_id = update.effective_user.id if update.effective_user else "неизвестно"
-    await update.message.reply_text(f"🆔 Твой Telegram ID: {user_id}")
-
-
-# ---------- main ----------
+# ==========================================
+# ЗАПУСК БОТА
+# ==========================================
 
 def main():
+
+    if "ВСТАВЬ_" in BOT_TOKEN:
+        raise ValueError("Не вставлен Telegram BOT TOKEN")
+
+    if "ВСТАВЬ_" in OZON_CLIENT_ID:
+        raise ValueError("Не вставлен Ozon Client ID")
+
+    if "ВСТАВЬ_" in OZON_API_KEY:
+        raise ValueError("Не вставлен Ozon API KEY")
+
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("date", date_command))
     app.add_handler(CommandHandler("all", all_command))
+
     app.add_handler(CommandHandler("adduser", adduser_command))
     app.add_handler(CommandHandler("removeuser", removeuser_command))
     app.add_handler(CommandHandler("listusers", listusers_command))
     app.add_handler(CommandHandler("myid", myid_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            message_handler
+        )
+    )
+
+    logger.info("Telegram bot is starting...")
+
     app.run_polling()
 
 
