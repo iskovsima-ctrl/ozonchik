@@ -18,11 +18,11 @@ from telegram.ext import (
 # API КЛЮЧИ — ВСТАВЬ СВОИ НОВЫЕ КЛЮЧИ
 # ==========================================
 
-BOT_TOKEN = "ВСТАВЬ_НОВЫЙ_TELEGRAM_TOKEN"
+BOT_TOKEN = "8876687619:AAF5roPChRSMwPDLaZFmmL0aP0Gowb56s6g"
 
-OZON_CLIENT_ID = "ВСТАВЬ_OZON_CLIENT_ID"
+OZON_CLIENT_ID = "3964041"
 
-OZON_API_KEY = "ВСТАВЬ_НОВЫЙ_OZON_API_KEY"
+OZON_API_KEY = "94b93451-a150-4dbb-a6ac-a0403ca2ae95Y"
 
 ADMIN_ID = 6354368621
 
